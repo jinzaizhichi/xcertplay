@@ -1,12 +1,9 @@
-# xcertplay
-
-English | [中文](README.zh-CN.md)
-
-`xcertplay` is an Android head-unit CarPlay receiver. It supports connecting to
-the MFI chip through a CH341 I2C bridge or directly through the board's I2C
-controller, and supports both wired and wireless CarPlay connections.
-
-> Still under active development.
+<div align="center">
+  <img src="https://raw.githubusercontent.com/shilapi/xcertplay/refs/heads/master/asset/xcertplay_small.png" width="180" height="180" alt="xcertplay icon" />
+<p><strong><font size="6">xcertplay</font></strong></p>
+  <a href="README.md">English</a> | <a href="README.zh-CN.md">中文</a>
+  <p>An Android head-unit CarPlay receiver. It supports connecting to the MFi chip through a CH341 I2C bridge or directly through the board's I2C controller, and supports both wired and wireless CarPlay connections.</p>
+</div>
 
 ## Features
 
