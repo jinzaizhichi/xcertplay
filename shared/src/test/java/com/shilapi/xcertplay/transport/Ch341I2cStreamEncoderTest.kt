@@ -9,7 +9,7 @@ class Ch341I2cStreamEncoderTest {
     @Test
     fun encodesWriteReadWithRepeatedStartAndFinalReadNack() {
         assertArrayEquals(
-            bytes(0xaa, 0x74, 0x82, 0x22, 0x30, 0x74, 0x81, 0x23, 0xc1, 0xc0, 0x75, 0x00),
+            bytes(0xaa, 0x74, 0x80, 0x22, 0x80, 0x30, 0x74, 0x80, 0x23, 0xc1, 0xc0, 0x75, 0x00),
             Ch341I2cStreamEncoder.transaction(0x11, bytes(0x30), 2),
         )
     }
@@ -23,6 +23,9 @@ class Ch341I2cStreamEncoderTest {
         )
 
         assertEquals(1, stream.count { it.toInt() and 0xff == 0x75 })
+        // The read-address setup of a segmented read is one batched `0x80|1` command, matching the
+        // hardware-proven reference (mfi3.py: `[START, OUT | 1, address]`), whose reply carries the
+        // requested data bytes with no leading ACK/NACK status byte.
         assertArrayEquals(bytes(0xaa, 0x74, 0x81, 0x23), stream.copyOfRange(0, 4))
         assertArrayEquals(bytes(0xde, 0xc0, 0x75, 0x00), stream.takeLast(4).toByteArray())
         assertTrue(Ch341I2cStreamEncoder.transaction(0x11, ByteArray(129), 0).isNotEmpty())

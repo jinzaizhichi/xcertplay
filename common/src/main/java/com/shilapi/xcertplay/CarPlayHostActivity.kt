@@ -107,11 +107,12 @@ class CarPlayHostActivity : ComponentActivity() {
         } else {
             emptyList()
         },
-        ch341MfiResetGpio = if (mfiTarget == MfiTarget.USB_CH341) {
-            0 // CH341 D0/CS0 -> open-drain MFi RST
-        } else {
-            null
-        },
+        // The CP latches its I2C address from the RST level at its own power-up, so the host must
+        // not pulse RST before discovery. Driving D0 re-latches the part onto the alternate
+        // address (0x10), where the accessory certificate is not readable. Leave RST at its
+        // hardware pull (VCC -> 0x11) and let the scanner find the part with its certificate.
+        // Set this back to 0 to restore the D0 pulse.
+        ch341MfiResetGpio = null,
         linuxI2cPath = if (mfiTarget == MfiTarget.I2C) mfiI2cPath.trim() else null,
         remoteMfiServer = remoteMfiServer.trim().takeIf { it.isNotEmpty() },
         remoteMfiToken = remoteMfiToken.takeIf { it.isNotEmpty() },

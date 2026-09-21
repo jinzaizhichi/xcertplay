@@ -28,6 +28,7 @@ import com.shilapi.xcertplay.airplay.AirPlaySessionListener
 import com.shilapi.xcertplay.airplay.PairingStore
 import com.shilapi.xcertplay.iap2.session.Iap2Session
 import com.shilapi.xcertplay.mfi.Iap2MfiAuthenticationClient
+import com.shilapi.xcertplay.mfi.MfiAuthenticationClient
 import com.shilapi.xcertplay.mfi.RemoteMfiAuthenticationClient
 import com.shilapi.xcertplay.network.CarPlayBonjour
 import com.shilapi.xcertplay.network.CarPlayVpnService
@@ -53,6 +54,7 @@ import com.shilapi.xcertplay.transport.Iap2WirelessCarPlayEndpoint
 import com.shilapi.xcertplay.transport.Iap2WirelessControlClient
 import com.shilapi.xcertplay.transport.Iap2WirelessControlTerminal
 import com.shilapi.xcertplay.transport.Iap2WirelessIdentification
+import com.shilapi.xcertplay.transport.I2cTransport
 import com.shilapi.xcertplay.transport.I2cTransportException
 import com.shilapi.xcertplay.transport.IphoneCarPlayConfiguration
 import com.shilapi.xcertplay.transport.IphoneUsbException
@@ -465,7 +467,8 @@ class CarPlayController(
                     transport.close()
                     throw error
                 }
-            } catch (_: MfiCoprocessorNotFoundException) {
+            } catch (error: MfiCoprocessorNotFoundException) {
+                debugLog("mfi Linux discovery failed: ${error.message}")
                 waitForMfi()
             } catch (error: Throwable) {
                 fail(error)
@@ -553,15 +556,22 @@ class CarPlayController(
                             }
                         }
                         val client = MfiRuntime.scan(transport)
+                        val probes = mfiCandidateAddresses
+                            .associateWith { address -> probeMfiCandidate(transport, address) }
+                        for ((address, probe) in probes) {
+                            debugLog("mfi probe address=0x${address.toString(16)} ${probe.describe()}")
+                        }
+                        val selected = preferCertificateBearingAddress(client, transport, probes)
                         debugLog(
-                            "mfi coprocessor address=0x${client.address7Bit.toString(16)} " +
-                                "protocolMajor=${client.protocolMajor()}",
+                            "mfi coprocessor address=0x${selected.address7Bit.toString(16)} " +
+                                "protocolMajor=${selected.protocolMajor()}",
                         )
-                        mfiSession = MfiSession(client, session)
+                        mfiSession = MfiSession(selected, session)
                         debugLog("mfi CH341 session ready")
                         onStatus(CarPlayStatus.MfiReady)
                         startPhone()
                     } catch (error: MfiCoprocessorNotFoundException) {
+                        debugLog("mfi CH341 discovery failed: ${error.message}")
                         Log.w(IphoneCarPlayConfiguration.TAG, error.message ?: "MFi discovery failed")
                         session.close()
                         waitForMfi()
@@ -576,6 +586,83 @@ class CarPlayController(
                 }
             }
         }
+    }
+
+    private val mfiCandidateAddresses = listOf(0x10, 0x11)
+    private val maxMfiCertificateBytes = 1280
+
+    private data class MfiCandidateProbe(
+        val deviceVersion: Int?,
+        val firmwareVersion: Int?,
+        val protocolMajor: Int?,
+        val accessoryCertificateLength: Int?,
+        val appleCertificateLength: Int?,
+        val failure: String?,
+    ) {
+        val hasAccessoryCertificate: Boolean
+            get() = (accessoryCertificateLength ?: 0) in 1..1280
+
+        fun describe(): String {
+            if (failure != null) return failure
+            return "deviceVersion=" + hex(deviceVersion) +
+                " firmwareVersion=" + hex(firmwareVersion) +
+                " protocolMajor=" + hex(protocolMajor) +
+                " accessoryCertificateLength=" + accessoryCertificateLength +
+                " appleCertificateLength=" + appleCertificateLength
+        }
+
+        private fun hex(value: Int?): String =
+            if (value == null) "?" else "0x" + value.toString(16).padStart(2, '0')
+    }
+
+    private fun probeMfiCandidate(transport: I2cTransport, address7Bit: Int): MfiCandidateProbe = try {
+        MfiCandidateProbe(
+            deviceVersion = readMfiRegister(transport, address7Bit, 0x00, 1),
+            firmwareVersion = readMfiRegister(transport, address7Bit, 0x01, 1),
+            protocolMajor = readMfiRegister(transport, address7Bit, 0x02, 1),
+            accessoryCertificateLength = readMfiRegister(transport, address7Bit, 0x30, 2),
+            appleCertificateLength = readMfiRegister(transport, address7Bit, 0x50, 2),
+            failure = null,
+        )
+    } catch (error: Throwable) {
+        MfiCandidateProbe(
+            deviceVersion = null,
+            firmwareVersion = null,
+            protocolMajor = null,
+            accessoryCertificateLength = null,
+            appleCertificateLength = null,
+            failure = "failed: " + error.javaClass.simpleName + ": " + error.message,
+        )
+    }
+
+    private fun readMfiRegister(
+        transport: I2cTransport,
+        address7Bit: Int,
+        register: Int,
+        length: Int,
+    ): Int {
+        transport.transaction(address7Bit, byteArrayOf(register.toByte()), 0)
+        var value = 0
+        for (byte in transport.transaction(address7Bit, ByteArray(0), length)) {
+            value = (value shl 8) or (byte.toInt() and 0xff)
+        }
+        return value
+    }
+
+    private fun preferCertificateBearingAddress(
+        client: MfiAuthenticationClient,
+        transport: I2cTransport,
+        probes: Map<Int, MfiCandidateProbe>,
+    ): MfiAuthenticationClient {
+        if (probes[client.address7Bit]?.hasAccessoryCertificate == true) return client
+        val alternative = probes.entries.firstOrNull { (address, probe) ->
+            address != client.address7Bit && probe.hasAccessoryCertificate
+        } ?: return client
+        debugLog(
+            "mfi address override: 0x" + client.address7Bit.toString(16) +
+                " has no accessory certificate; using 0x" + alternative.key.toString(16),
+        )
+        return MfiAuthenticationClient(transport, alternative.key)
     }
 
     private fun waitForMfi() {
