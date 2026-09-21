@@ -1,6 +1,6 @@
 <div align="center">
   <img src="https://raw.githubusercontent.com/shilapi/xcertplay/refs/heads/master/asset/xcertplay_small.png" width="180" height="180" alt="xcertplay icon" />
-<p><strong><font size="6">xcertplay</font></strong></p>
+<h1><strong><font size="6">xcertplay</font></strong></h1>
   <a href="README.md">English</a> | <a href="README.zh-CN.md">中文</a>
   <p>xcertplay 是面向 Android 车机的 CarPlay 接收端项目。支持通过 CH341 I2C 桥接到 MFi 芯片，亦可通过板载 I2C 控制器直连，支持 CarPlay 有线和无线连接。</p>
 </div>
