@@ -256,7 +256,7 @@ class CarPlayHostActivity : ComponentActivity() {
     private var hevcSoftwareDecoderEnabled = false
     private var advancedAudioChannelMappingSupported = false
     private var advancedAudioChannelMapping = false
-    private var debugLogsEnabled = false
+    @Volatile private var debugLogsEnabled = false
     private var autoStartOnBoot = false
     private var manufacturer = AirPlayPersistence.DEFAULT_MANUFACTURER
     private var model = AirPlayPersistence.DEFAULT_MODEL
@@ -309,8 +309,29 @@ class CarPlayHostActivity : ComponentActivity() {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val teardownExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     private val airPlayCommandExecutor: ExecutorService = Executors.newSingleThreadExecutor()
-    private val logLines = ArrayDeque<LogEntry>()
+    private val logLines = ScreenLogBuffer(MAX_SCREEN_LOG_LINES)
+    private val pendingScreenLogs = ArrayDeque<PendingLog>()
+    private val pendingScreenLogsLock = Any()
+    private var screenDrainPosted = false
+    private val drainScreenLogs = Runnable {
+        val pending = synchronized(pendingScreenLogsLock) {
+            screenDrainPosted = false
+            pendingScreenLogs.toList().also { pendingScreenLogs.clear() }
+        }
+        if (debugLogsEnabled && !menuOpen) {
+            pending.forEach { entry ->
+                if (entry.generation == restartGeneration) {
+                    appendScreenLog(entry.timestampMillis, entry.message)
+                }
+            }
+        }
+    }
     private val expireOldLogLines = Runnable { refreshLogView(System.currentTimeMillis()) }
+    private var logRenderScheduled = false
+    private val renderLogLines = Runnable {
+        logRenderScheduled = false
+        refreshLogView(System.currentTimeMillis())
+    }
     private val applyDisplaySize = Runnable {
         val size = pendingDisplaySize ?: return@Runnable
         pendingDisplaySize = null
@@ -555,6 +576,8 @@ class CarPlayHostActivity : ComponentActivity() {
     override fun onDestroy() {
         mainHandler.removeCallbacks(applyDisplaySize)
         mainHandler.removeCallbacks(expireOldLogLines)
+        mainHandler.removeCallbacks(renderLogLines)
+        mainHandler.removeCallbacks(drainScreenLogs)
         currentSurface?.let { surface ->
             sink?.clearSurface(SCREEN_TYPE_MAIN, surface)
             sink?.clearSurface(SCREEN_TYPE_ALT, surface)
@@ -1639,6 +1662,7 @@ class CarPlayHostActivity : ComponentActivity() {
             description = "Show on-screen debug logs",
         ) { checked ->
             debugLogsEnabled = checked
+            if (!checked) clearScreenLogs()
             appendLog("Debug logs ${if (debugLogsEnabled) "enabled" else "disabled"}")
             updateDebugOverlays()
         }
@@ -2764,14 +2788,16 @@ class CarPlayHostActivity : ComponentActivity() {
             }
 
             override fun onDebugLog(message: String) {
-                runOnUiThread {
-                    if (menuOpen || controllerGeneration != restartGeneration) {
-                        return@runOnUiThread
-                    }
-                    if (message.startsWith(PROTOCOL_TRACE_PREFIX)) {
-                        appendFileLog(message)
-                    } else {
-                        appendLog(message)
+                val now = System.currentTimeMillis()
+                appendFileLog(message, now)
+                if (!debugLogsEnabled || message.startsWith(PROTOCOL_TRACE_PREFIX)) return
+                synchronized(pendingScreenLogsLock) {
+                    if (!debugLogsEnabled) return
+                    pendingScreenLogs.addLast(PendingLog(controllerGeneration, now, message))
+                    if (pendingScreenLogs.size > MAX_SCREEN_LOG_LINES) pendingScreenLogs.removeFirst()
+                    if (!screenDrainPosted) {
+                        screenDrainPosted = true
+                        mainHandler.post(drainScreenLogs)
                     }
                 }
             }
@@ -3045,7 +3071,7 @@ class CarPlayHostActivity : ComponentActivity() {
         gestureOverlay?.visibility = View.GONE
         settingsMenu?.visibility = View.VISIBLE
         updateDebugOverlays()
-        logLines.clear()
+        clearScreenLogs()
         appendLog("Settings opened; CarPlay handshake reset")
         updateResolutionMenu()
         teardownExecutor.execute {
@@ -3092,7 +3118,7 @@ class CarPlayHostActivity : ComponentActivity() {
         settingsMenu?.visibility = View.GONE
         gestureOverlay?.visibility = View.VISIBLE
         updateDebugOverlays()
-        logLines.clear()
+        clearScreenLogs()
         appendLog(
             "$prefix; starting a fresh handshake at " +
                 "${CarPlayDisplayScale.label(displayScaleTenths)} with " +
@@ -3252,15 +3278,20 @@ class CarPlayHostActivity : ComponentActivity() {
 
     private fun appendLog(message: String) {
         val now = System.currentTimeMillis()
-        val line = formattedLogLine(message, now)
-        logLines.addLast(LogEntry(now, line))
-        sessionLog?.append(line)
-        refreshLogView(now)
+        appendFileLog(message, now)
+        if (debugLogsEnabled && !menuOpen) appendScreenLog(now, message)
     }
 
-    private fun appendFileLog(message: String) {
-        sessionLog?.append(formattedLogLine(message, System.currentTimeMillis()))
+    private fun appendScreenLog(timestampMillis: Long, message: String) {
+        logLines.add(timestampMillis, formattedLogLine(message, timestampMillis))
+        if (!logRenderScheduled) {
+            logRenderScheduled = true
+            mainHandler.postDelayed(renderLogLines, LOG_RENDER_INTERVAL_MILLIS)
+        }
     }
+
+    private fun appendFileLog(message: String, timestampMillis: Long) =
+        sessionLog?.appendTimestamped(message, timestampMillis)
 
     private fun formattedLogLine(message: String, nowMillis: Long): String =
         "${SimpleDateFormat("HH:mm:ss.SSS", Locale.US).format(Date(nowMillis))}  $message"
@@ -3280,19 +3311,31 @@ class CarPlayHostActivity : ComponentActivity() {
     }
 
     private fun refreshLogView(nowMillis: Long) {
+        if (!debugLogsEnabled || menuOpen) return
         val cutoff = nowMillis - LOG_RETENTION_MILLIS
-        while (logLines.firstOrNull()?.timestampMillis?.let { it <= cutoff } == true) {
-            logLines.removeFirst()
-        }
-        statusView?.text = logLines.joinToString("\n") { it.text }
+        logLines.expireBefore(cutoff)
+        statusView?.text = logLines.renderedText()
         scrollLogsToBottom()
 
         mainHandler.removeCallbacks(expireOldLogLines)
-        logLines.firstOrNull()?.let { oldest ->
-            val delay = (oldest.timestampMillis + LOG_RETENTION_MILLIS - nowMillis + 1L)
+        logLines.firstTimestampMillis?.let { oldest ->
+            val delay = (oldest + LOG_RETENTION_MILLIS - nowMillis + 1L)
                 .coerceAtLeast(1L)
             mainHandler.postDelayed(expireOldLogLines, delay)
         }
+    }
+
+    private fun clearScreenLogs() {
+        synchronized(pendingScreenLogsLock) {
+            pendingScreenLogs.clear()
+            screenDrainPosted = false
+        }
+        mainHandler.removeCallbacks(drainScreenLogs)
+        logLines.clear()
+        mainHandler.removeCallbacks(expireOldLogLines)
+        mainHandler.removeCallbacks(renderLogLines)
+        logRenderScheduled = false
+        statusView?.text = ""
     }
 
     private fun scrollLogsToBottom() {
@@ -3355,6 +3398,8 @@ class CarPlayHostActivity : ComponentActivity() {
         const val SCREEN_TYPE_MAIN = 110
         const val SCREEN_TYPE_ALT = 111
         const val LOG_RETENTION_MILLIS = 5 * 60_000L
+        const val LOG_RENDER_INTERVAL_MILLIS = 100L
+        const val MAX_SCREEN_LOG_LINES = 100
         const val DISPLAY_CHANGE_DEBOUNCE_MILLIS = 500L
         const val RECONNECT_DELAY_MILLIS = 2_000L
         const val IAP_TUNNEL_RECONNECT_DELAY_MILLIS = 15_000L
@@ -3377,7 +3422,11 @@ class CarPlayHostActivity : ComponentActivity() {
     }
 
     private data class DisplaySize(val width: Int, val height: Int)
-    private data class LogEntry(val timestampMillis: Long, val text: String)
+    private data class PendingLog(
+        val generation: Int,
+        val timestampMillis: Long,
+        val message: String,
+    )
     private data class HotspotStatus(
         val state: String,
         val ssid: String? = null,
