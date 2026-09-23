@@ -31,6 +31,11 @@ android {
     }
 
     buildTypes {
+        debug {
+            if (providers.environmentVariable("ANDROID_KEYSTORE_PATH").isPresent) {
+                signingConfig = signingConfigs.getByName("release")
+            }
+        }
         release {
             optimization {
                 enable = false
