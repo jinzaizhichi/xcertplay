@@ -1,6 +1,7 @@
 package com.shilapi.xcertplay
 
 import android.Manifest
+import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.Configuration
@@ -16,6 +17,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.Process
+import android.provider.Settings
 import android.text.Editable
 import android.text.InputType
 import android.text.TextUtils
@@ -39,6 +41,7 @@ import android.widget.ScrollView
 import android.widget.SeekBar
 import android.widget.Switch
 import android.widget.TextView
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
@@ -1209,6 +1212,21 @@ class CarPlayHostActivity : ComponentActivity() {
                 ViewGroup.LayoutParams.WRAP_CONTENT,
             ).apply { topMargin = dp(12) },
         )
+        content.addView(
+            Button(this).apply {
+                text = "Open system Bluetooth settings"
+                isAllCaps = false
+                textSize = 17f
+                setTextColor(MENU_BUTTON_TEXT)
+                backgroundTintList = ColorStateList.valueOf(MENU_ACCENT)
+                minHeight = dp(52)
+                setOnClickListener { openSystemBluetoothSettings() }
+            },
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(16) },
+        )
 
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
             content.addView(
@@ -1702,6 +1720,18 @@ class CarPlayHostActivity : ComponentActivity() {
             appendLog("Debug logs ${if (debugLogsEnabled) "enabled" else "disabled"}")
             updateDebugOverlays()
         }
+
+    private fun openSystemBluetoothSettings() {
+        try {
+            startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS))
+        } catch (error: ActivityNotFoundException) {
+            appendLog("System Bluetooth settings are unavailable: ${error.message}")
+            Toast.makeText(this, "System Bluetooth settings are unavailable", Toast.LENGTH_LONG).show()
+        } catch (error: SecurityException) {
+            appendLog("Cannot open system Bluetooth settings: ${error.message}")
+            Toast.makeText(this, "Cannot open system Bluetooth settings", Toast.LENGTH_LONG).show()
+        }
+    }
 
     private fun buildStepSliderSection(
         title: String,
