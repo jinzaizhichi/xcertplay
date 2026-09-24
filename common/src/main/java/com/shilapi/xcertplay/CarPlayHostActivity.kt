@@ -30,6 +30,7 @@ import android.view.ViewGroup
 import android.widget.Button
 import android.widget.EditText
 import android.widget.FrameLayout
+import android.widget.ImageButton
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.RadioButton
@@ -219,6 +220,7 @@ class CarPlayHostActivity : ComponentActivity() {
 
     private var videoView: TextureView? = null
     private var gestureOverlay: View? = null
+    private var disconnectedSettingsButton: View? = null
     private var settingsMenu: View? = null
     private var mfiTargetGroup: RadioGroup? = null
     private var mfiI2cFields: View? = null
@@ -257,6 +259,7 @@ class CarPlayHostActivity : ComponentActivity() {
     private var advancedAudioChannelMappingSupported = false
     private var advancedAudioChannelMapping = false
     @Volatile private var debugLogsEnabled = false
+    private var moreGesturesToSettings = false
     private var autoStartOnBoot = false
     private var manufacturer = AirPlayPersistence.DEFAULT_MANUFACTURER
     private var model = AirPlayPersistence.DEFAULT_MODEL
@@ -305,6 +308,8 @@ class CarPlayHostActivity : ComponentActivity() {
     private var gestureTracking = false
     private var gestureStartX = 0f
     private var gestureStartY = 0f
+    private var edgeSettingsGestureCaptured = false
+    private var edgeSettingsGestureEligible = false
     private val shuttingDown = AtomicBoolean(false)
     private val mainHandler = Handler(Looper.getMainLooper())
     private val teardownExecutor: ExecutorService = Executors.newSingleThreadExecutor()
@@ -432,6 +437,7 @@ class CarPlayHostActivity : ComponentActivity() {
             advancedAudioChannelMappingSupported &&
                 AirPlayPersistence.loadAdvancedAudioChannelMapping(this)
         debugLogsEnabled = AirPlayPersistence.loadDebugLogsEnabled(this)
+        moreGesturesToSettings = AirPlayPersistence.loadMoreGesturesToSettings(this)
         autoStartOnBoot = AirPlayPersistence.loadAutoStartOnBoot(this)
         manufacturer = AirPlayPersistence.loadManufacturer(this)
         model = AirPlayPersistence.loadModel(this)
@@ -646,6 +652,17 @@ class CarPlayHostActivity : ComponentActivity() {
                 setColor(Color.argb(170, 0, 0, 0))
             }
         }
+        val settingsButton = ImageButton(this).apply {
+            setImageResource(R.drawable.ic_settings)
+            imageTintList = ColorStateList.valueOf(Color.rgb(0xA6, 0x7D, 0xF2))
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(Color.rgb(0xE3, 0xE3, 0xE4))
+            }
+            setPadding(dp(14), dp(14), dp(14), dp(14))
+            contentDescription = "Open settings"
+            setOnClickListener { openSettingsMenu() }
+        }
         val statusParams = FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.MATCH_PARENT,
             FrameLayout.LayoutParams.WRAP_CONTENT,
@@ -658,6 +675,11 @@ class CarPlayHostActivity : ComponentActivity() {
             Gravity.TOP or Gravity.END,
         )
         stageParams.setMargins(dp(12), dp(12), dp(12), 0)
+        val settingsButtonParams = FrameLayout.LayoutParams(
+            dp(56),
+            dp(56),
+            Gravity.BOTTOM or Gravity.END,
+        ).apply { setMargins(dp(16), 0, dp(16), dp(16)) }
 
         val settings = buildSettingsMenu().apply { visibility = View.GONE }
         val editor = buildSafeAreaEditor().apply { visibility = View.GONE }
@@ -672,6 +694,7 @@ class CarPlayHostActivity : ComponentActivity() {
         )
         root.addView(logScroll, statusParams)
         root.addView(stageStatus, stageParams)
+        root.addView(settingsButton, settingsButtonParams)
         root.addView(
             settings,
             FrameLayout.LayoutParams(
@@ -688,6 +711,7 @@ class CarPlayHostActivity : ComponentActivity() {
         )
         videoView = video
         gestureOverlay = gestureLayer
+        disconnectedSettingsButton = settingsButton
         settingsMenu = settings
         safeAreaEditor = editor
         statusView = log
@@ -1159,6 +1183,17 @@ class CarPlayHostActivity : ComponentActivity() {
                 ViewGroup.LayoutParams.WRAP_CONTENT,
             ).apply { topMargin = dp(12) },
         )
+        content.addView(
+            settingsSwitchRow(
+                label = "More gestures to Settings page",
+                checked = moreGesturesToSettings,
+                description = "Enable a one-finger swipe down along the left edge to open settings",
+            ) { checked -> moreGesturesToSettings = checked },
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(12) },
+        )
 
         content.addView(
             settingsCategoryHeader("Diagnostics"),
@@ -1327,6 +1362,7 @@ class CarPlayHostActivity : ComponentActivity() {
         AirPlayPersistence.saveModel(this, model)
         AirPlayPersistence.saveOemLabel(this, oemLabel)
         AirPlayPersistence.saveDebugLogsEnabled(this, debugLogsEnabled)
+        AirPlayPersistence.saveMoreGesturesToSettings(this, moreGesturesToSettings)
         AirPlayPersistence.saveRightHandDrive(this, rightHandDrive)
         AirPlayPersistence.saveHideTopBar(this, hideTopBar)
         AirPlayPersistence.saveHideBottomBar(this, hideBottomBar)
@@ -3176,9 +3212,15 @@ class CarPlayHostActivity : ComponentActivity() {
             MotionEvent.ACTION_DOWN -> {
                 gestureSequenceActive = false
                 gestureTracking = false
+                edgeSettingsGestureCaptured = moreGesturesToSettings &&
+                    event.x in 0f..(view.width / 8f) &&
+                    event.y in 0f..(view.height / 4f)
+                edgeSettingsGestureEligible = edgeSettingsGestureCaptured
             }
             MotionEvent.ACTION_POINTER_DOWN -> {
                 if (event.pointerCount == THREE_FINGER_COUNT && !gestureSequenceActive) {
+                    edgeSettingsGestureCaptured = false
+                    edgeSettingsGestureEligible = false
                     gestureSequenceActive = true
                     gestureTracking = true
                     gestureStartX = pointerCentroid(event, horizontal = true)
@@ -3188,6 +3230,30 @@ class CarPlayHostActivity : ComponentActivity() {
                     return true
                 }
             }
+        }
+
+        if (edgeSettingsGestureCaptured) {
+            when (event.actionMasked) {
+                MotionEvent.ACTION_POINTER_DOWN -> edgeSettingsGestureEligible = false
+                MotionEvent.ACTION_MOVE -> {
+                    if (event.pointerCount != 1 || event.x !in 0f..(view.width / 8f)) {
+                        edgeSettingsGestureEligible = false
+                    }
+                }
+                MotionEvent.ACTION_UP -> {
+                    val openSettings = edgeSettingsGestureEligible &&
+                        event.x in 0f..(view.width / 8f) &&
+                        event.y in (view.height * 3f / 4f)..view.height.toFloat()
+                    edgeSettingsGestureCaptured = false
+                    edgeSettingsGestureEligible = false
+                    if (openSettings) openSettingsMenu()
+                }
+                MotionEvent.ACTION_CANCEL -> {
+                    edgeSettingsGestureCaptured = false
+                    edgeSettingsGestureEligible = false
+                }
+            }
+            return true
         }
 
         if (gestureSequenceActive) {
@@ -3270,6 +3336,8 @@ class CarPlayHostActivity : ComponentActivity() {
     private fun updateDebugOverlays() {
         val showLogs = debugLogsEnabled && !menuOpen
         statusScrollView?.visibility = if (showLogs) View.VISIBLE else View.GONE
+        disconnectedSettingsButton?.visibility =
+            if (!menuOpen && activeScreenStreamTypes.isEmpty()) View.VISIBLE else View.GONE
         val showStage = !debugLogsEnabled &&
             !menuOpen &&
             activeScreenStreamTypes.isEmpty()

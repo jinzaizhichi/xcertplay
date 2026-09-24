@@ -23,8 +23,9 @@
 ## Usage
 
 1. Pair your iPhone with the head unit via Bluetooth.
-2. In the app, swipe down with three fingers to open the Settings page.
+2. Before a CarPlay video stream starts, tap the Settings button in the lower-right corner. You can also swipe down with three fingers to open Settings.
 3. Make sure all the settings are configured as desired.
+   To enable another entry gesture, turn on `More gestures to Settings page`. Start with one finger in the upper quarter of the left eighth of the screen, slide down along that strip, and lift in the lower quarter.
 4. Scroll to the bottom and select `Save & Reconnect`.
 5. Connect your MFi chip using the method you selected.
 6. Wait for the connection to complete, then enjoy.
@@ -32,7 +33,7 @@
 ## TODO
 
 - [ ] Bluetooth activity popup
-- [ ] more gesture for setting page
+- [x] more gesture for setting page
 - [x] debug log caused stuck bug
 - [ ] microphone passthrough bug
 
