@@ -33,7 +33,7 @@
 
 - [ ] Bluetooth activity popup
 - [ ] more gesture for setting page
-- [ ] debug log caused stuck bug
+- [x] debug log caused stuck bug
 - [ ] microphone passthrough bug
 
 ## Current progress
