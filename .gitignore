@@ -15,7 +15,13 @@ local.properties
 captures/
 
 # Local agent working notes
-/agent_docs/
+agent_docs/
+research/
+
+tools/
+mobile/release/
+mobile/debug/
+
 
 # OS files
 .DS_Store
