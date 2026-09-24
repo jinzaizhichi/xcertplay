@@ -2,6 +2,7 @@ package com.shilapi.xcertplay.airplay
 
 import java.io.Closeable
 import java.net.Socket
+import java.net.InetAddress
 import java.math.BigInteger
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -63,6 +64,105 @@ class CarPlayMediaEngineTest {
 
         assertEquals(setOf(110 to false, 111 to false), events.toSet())
         assertTrue(streams.isEmpty())
+    }
+
+    @Test
+    fun microphoneFollowsThePhonesInputPortForAnyMainAudioCategory() {
+        val requested = mapOf("audioType" to "default", "dataPort" to 12345)
+        assertEquals(12345, requestedMicrophonePort(true, 100, requested))
+        assertEquals(
+            12345,
+            requestedMicrophonePort(true, 100, mapOf("audioType" to "compatibility", "dataPort" to 12345)),
+        )
+        assertEquals(null, requestedMicrophonePort(false, 100, requested))
+        assertEquals(null, requestedMicrophonePort(true, 101, requested))
+        assertEquals(null, requestedMicrophonePort(true, 100, mapOf("dataPort" to 0)))
+        assertEquals(null, requestedMicrophonePort(true, 100, mapOf("dataPort" to 65536)))
+        assertEquals(null, requestedMicrophonePort(true, 100, emptyMap()))
+    }
+
+    @Test
+    fun opusMicrophoneRateFollowsTheSelectedFormatBit() {
+        assertEquals(16_000, AudioStreamCodec.opusCaptureRate(0x10000000L))
+        assertEquals(24_000, AudioStreamCodec.opusCaptureRate(0x20000000L))
+        assertEquals(48_000, AudioStreamCodec.opusCaptureRate(0x40000000L))
+    }
+
+    @Test
+    fun microphoneStartsAfterSetupResponseWithoutWaitingForDownlinkAudio() {
+        val events = mutableListOf<String>()
+        val sink = object : MediaSink {
+            override fun onMicrophoneStarted(type: Int, config: MicrophoneConfig) {
+                events += "start:$type:${config.audioType}"
+            }
+
+            override fun onMicrophoneStopped(type: Int) {
+                events += "stop:$type"
+            }
+        }
+        val session = testSession()
+        val engine = CarPlayMediaEngine(sink, microphoneEnabled = true)
+        val pendingField = CarPlayMediaEngine::class.java.getDeclaredField("pendingMicrophone").apply {
+            isAccessible = true
+        }
+        @Suppress("UNCHECKED_CAST")
+        val pending = pendingField.get(engine) as MutableMap<CarPlayMediaEngine.StreamKey, MicrophoneConfig>
+        pending[CarPlayMediaEngine.StreamKey(session, 100)] = MicrophoneConfig(
+            audioType = "default",
+            sampleRate = 16_000,
+            channels = 1,
+            payloadType = 100,
+            frameMillis = 20,
+            host = InetAddress.getLoopbackAddress(),
+            port = 12345,
+            key = ByteArray(32),
+        )
+
+        engine.onSetupResponseSent(session)
+        engine.onSetupResponseSent(session)
+        assertEquals(listOf("start:100:default"), events)
+
+        engine.onTeardown(session, 100)
+        session.close()
+        assertEquals(listOf("start:100:default", "stop:100"), events)
+    }
+
+    @Test
+    fun sessionCloseStopsAnActiveMicrophone() {
+        val events = mutableListOf<String>()
+        val sink = object : MediaSink {
+            override fun onMicrophoneStarted(type: Int, config: MicrophoneConfig) {
+                events += "start"
+            }
+
+            override fun onMicrophoneStopped(type: Int) {
+                events += "stop"
+            }
+        }
+        val session = testSession()
+        val engine = CarPlayMediaEngine(sink, microphoneEnabled = true)
+        val pendingField = CarPlayMediaEngine::class.java.getDeclaredField("pendingMicrophone").apply {
+            isAccessible = true
+        }
+        @Suppress("UNCHECKED_CAST")
+        val pending = pendingField.get(engine) as MutableMap<CarPlayMediaEngine.StreamKey, MicrophoneConfig>
+        pending[CarPlayMediaEngine.StreamKey(session, 100)] = MicrophoneConfig(
+            audioType = "default",
+            sampleRate = 16_000,
+            channels = 1,
+            payloadType = 100,
+            frameMillis = 20,
+            host = InetAddress.getLoopbackAddress(),
+            port = 12345,
+            key = ByteArray(32),
+        )
+
+        engine.onSetupResponseSent(session)
+        engine.onSessionClosed(session)
+        session.close()
+
+        assertEquals(listOf("start", "stop"), events)
+        assertTrue(pending.isEmpty())
     }
 
     private fun testSession(): AirPlaySession = AirPlaySession(

@@ -6,14 +6,14 @@ import android.util.Log
 import java.io.Closeable
 
 /**
- * Encodes 20 ms chunks of 48 kHz mono PCM into raw Opus access units for the CarPlay
- * microphone uplink.
+ * Encodes 20 ms chunks of mono PCM at the negotiated input rate into raw Opus access units
+ * for the CarPlay microphone uplink.
  */
-internal class OpusEncoder(bitrate: Int) : Closeable {
+internal class OpusEncoder(sampleRate: Int, bitrate: Int) : Closeable {
     private val codec: MediaCodec? = try {
         val format = MediaFormat.createAudioFormat(
             MediaFormat.MIMETYPE_AUDIO_OPUS,
-            SAMPLE_RATE,
+            sampleRate,
             CHANNELS,
         ).apply {
             setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
@@ -27,7 +27,7 @@ internal class OpusEncoder(bitrate: Int) : Closeable {
                 MediaCodec.CONFIGURE_FLAG_ENCODE,
             )
             it.start()
-            Log.i(TAG, "Opus microphone encoder started bitrate=$bitrate")
+            Log.i(TAG, "Opus microphone encoder started rate=$sampleRate bitrate=$bitrate")
         }
     } catch (error: Exception) {
         Log.w(TAG, "Opus microphone encoder unavailable", error)
@@ -131,7 +131,6 @@ internal class OpusEncoder(bitrate: Int) : Closeable {
 
     private companion object {
         const val TAG = "xcertplay-usb"
-        const val SAMPLE_RATE = 48_000
         const val CHANNELS = 1
         const val INPUT_TIMEOUT_US = 10_000L
         const val INPUT_DURATION_US = 20_000L
