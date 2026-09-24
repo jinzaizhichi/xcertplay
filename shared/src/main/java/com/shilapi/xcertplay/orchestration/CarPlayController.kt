@@ -2,6 +2,7 @@ package com.shilapi.xcertplay.orchestration
 
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothA2dp
+import android.bluetooth.BluetoothClass
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothHeadset
 import android.bluetooth.BluetoothManager
@@ -780,11 +781,11 @@ class CarPlayController(
             val adapter = bluetoothAdapter
                 ?: throw IOException("Bluetooth adapter is unavailable")
             if (!adapter.isEnabled) throw IOException("Bluetooth is not enabled")
-            val device = selectWirelessBluetoothDevice(adapter)
+            val devices = selectWirelessBluetoothDevices(adapter)
             val hostBluetoothMac = accessoryBluetoothMac(adapter)
             debugLog(
-                "wireless selected Bluetooth target name=${device.name ?: "unknown"} " +
-                    "address=${device.address} localBt=$hostBluetoothMac",
+                "wireless Bluetooth PHONE_SMART candidates=${devices.size} " +
+                    "localBt=$hostBluetoothMac",
             )
             val wirelessAirPlayConfig = airPlayConfig.copy(
                 deviceId = deviceIdentifier,
@@ -836,27 +837,7 @@ class CarPlayController(
                 return
             }
 
-            onStatus(CarPlayStatus.ConnectingBluetooth)
-            debugLog(
-                "wireless RFCOMM connecting address=${device.address} " +
-                    "uuid=$IAP2_IPHONE_UUID",
-            )
-            val socket = device
-                    .createRfcommSocketToServiceRecord(UUID.fromString(IAP2_IPHONE_UUID))
-                    .also { bluetoothSocket = it }
-            connectBluetoothSocket(socket, device.address)
-            debugLog("wireless RFCOMM connected address=${device.address}")
-            if (isStaleWirelessRun(generation)) {
-                closeWirelessStack()
-                return
-            }
-            val stream = BluetoothRfcommDuplexStream(socket).also { bluetoothStream = it }
-            val channel = Iap2Session.openWireless(
-                stream,
-                traceContext = "wireless-rfcomm",
-                onTrace = ::debugLog,
-            ).also { csm = it }
-            debugLog("wireless iAP2 CSM channel opened over RFCOMM")
+            val channel = connectWirelessBluetoothDevices(devices, generation)
             if (isStaleWirelessRun(generation)) {
                 closeWirelessStack()
                 return
@@ -1436,42 +1417,81 @@ class CarPlayController(
     private fun isStaleWirelessRun(generation: Int): Boolean =
         closed || phase != Phase.WIRELESS || generation != wirelessGeneration.get()
 
-    private fun selectWirelessBluetoothDevice(adapter: BluetoothAdapter): BluetoothDevice {
+    private fun selectWirelessBluetoothDevices(adapter: BluetoothAdapter): List<BluetoothDevice> {
         val bonded = adapter.bondedDevices.orEmpty()
-        val iPhones = bonded.filter { device ->
-            device.name?.contains("iPhone", ignoreCase = true) == true
+        val smartPhones = bonded.filter { device ->
+            val bluetoothClass = device.bluetoothClass
+            debugLog(
+                "wireless Bluetooth bonded name=${device.name ?: "unknown"} " +
+                    "address=${device.address} class=${bluetoothClass ?: "unknown"} " +
+                    "deviceClass=${bluetoothClass?.deviceClass?.toString(16) ?: "unknown"}",
+            )
+            bluetoothClass?.deviceClass == BluetoothClass.Device.PHONE_SMART
         }
-        val directlyConnectedIPhones = iPhones.filter(::isBluetoothDeviceConnected)
+        if (smartPhones.isEmpty()) {
+            throw IOException("No bonded PHONE_SMART devices found; pair an iPhone and retry")
+        }
+        val directlyConnectedSmartPhones = smartPhones.filter(::isBluetoothDeviceConnected)
         Log.i(
             IphoneCarPlayConfiguration.TAG,
-            "wireless Bluetooth bondedIPhones=${iPhones.size} " +
-                "directlyConnected=${directlyConnectedIPhones.size}",
+            "wireless Bluetooth bondedSmartPhones=${smartPhones.size} " +
+                "directlyConnected=${directlyConnectedSmartPhones.size}",
         )
-        val connectedIPhones = if (directlyConnectedIPhones.isNotEmpty()) {
-            directlyConnectedIPhones
+        val connectedAddresses = if (directlyConnectedSmartPhones.isNotEmpty()) {
+            directlyConnectedSmartPhones.mapTo(mutableSetOf()) { it.address }
         } else {
-            val connectedAddresses = connectedBluetoothDevices(adapter).mapTo(mutableSetOf()) {
+            connectedBluetoothDevices(adapter).mapTo(mutableSetOf()) {
                 it.address
             }
-            iPhones.filter { it.address in connectedAddresses }
         }
-        if (connectedIPhones.size == 1) return connectedIPhones.single()
-        if (connectedIPhones.size > 1) {
-            throw IOException(
-                "Multiple connected iPhones found: " +
-                    connectedIPhones.joinToString { "${it.name ?: "iPhone"} (${it.address})" },
+        return smartPhones.sortedWith(
+            compareByDescending<BluetoothDevice> { it.address in connectedAddresses }
+                .thenBy { it.address },
+        )
+    }
+
+    private fun connectWirelessBluetoothDevices(
+        devices: List<BluetoothDevice>,
+        generation: Int,
+    ): Iap2Session {
+        var lastFailure: Exception? = null
+        for ((index, device) in devices.withIndex()) {
+            if (isStaleWirelessRun(generation)) {
+                throw IOException("Wireless Bluetooth connection was cancelled")
+            }
+            onStatus(CarPlayStatus.ConnectingBluetooth)
+            debugLog(
+                "wireless RFCOMM attempt=${index + 1}/${devices.size} " +
+                    "name=${device.name ?: "unknown"} address=${device.address} " +
+                    "uuid=$IAP2_IPHONE_UUID",
             )
+            try {
+                val socket = device
+                    .createRfcommSocketToServiceRecord(UUID.fromString(IAP2_IPHONE_UUID))
+                    .also { bluetoothSocket = it }
+                connectBluetoothSocket(socket, device.address)
+                if (isStaleWirelessRun(generation)) {
+                    throw IOException("Wireless Bluetooth connection was cancelled")
+                }
+                debugLog("wireless RFCOMM connected address=${device.address}")
+                val stream = BluetoothRfcommDuplexStream(socket).also { bluetoothStream = it }
+                val channel = Iap2Session.openWireless(
+                    stream,
+                    traceContext = "wireless-rfcomm",
+                    onTrace = ::debugLog,
+                ).also { csm = it }
+                debugLog("wireless iAP2 CSM channel opened address=${device.address}")
+                return channel
+            } catch (error: Exception) {
+                closeBluetoothBootstrapTransport()
+                if (isStaleWirelessRun(generation)) throw error
+                lastFailure = error
+                debugLog("wireless RFCOMM attempt failed address=${device.address}", error)
+            }
         }
-        if (iPhones.size == 1) return iPhones.single()
-        if (iPhones.size > 1) {
-            throw IOException(
-                "Multiple bonded iPhones found and none is currently connected; " +
-                    "connect one iPhone and retry",
-            )
-        }
-        if (bonded.size == 1) return bonded.single()
         throw IOException(
-            "No unambiguous bonded iPhone found; pair one iPhone and retry",
+            "Could not open iAP2 over Bluetooth with any of ${devices.size} bonded PHONE_SMART devices",
+            lastFailure,
         )
     }
 
